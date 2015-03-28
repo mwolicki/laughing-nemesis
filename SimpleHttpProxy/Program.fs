@@ -90,9 +90,9 @@ module Proxy =
                   let! responseBytes = stream.ReadAllAsync
                   return HttResponse.OK (response.Headers, responseBytes)
               with | :? WebException as e -> match e with
-                                             |Http304 -> return NotModified
-                                             |Http404 -> return NotFound
-                                             |_ -> return UnknownError e.Message
+                                             | Http304 -> return NotModified
+                                             | Http404 -> return NotFound
+                                             | _ -> return UnknownError e.Message
         }
         fun (ctx : HttpContext) ->
             async {
@@ -105,12 +105,12 @@ module Proxy =
               Async.StartAsTask (publishWebsiteResponse website publishEvent.NextExpectedVersion) |> ignore
 
               match website with
-              |OK (headers,responseBytes) -> 
-                let headers = headers.AllKeys |> Seq.map(fun x->(x, headers.[x]))|> Seq.toList
-                return! (ok responseBytes) {ctx with response = {ctx.response with headers = headers}}
-              |NotModified -> return! Redirection.not_modified ctx
-              |NotFound -> return! RequestErrors.NOT_FOUND "Page not found" ctx
-              |UnknownError text -> return! RequestErrors.BAD_REQUEST text ctx
+              | OK (headers,responseBytes) -> 
+                    let headers = headers.AllKeys |> Seq.map(fun x->(x, headers.[x]))|> Seq.toList
+                    return! (ok responseBytes) {ctx with response = {ctx.response with headers = headers}}
+              | NotModified -> return! Redirection.not_modified ctx
+              | NotFound -> return! RequestErrors.NOT_FOUND "Page not found" ctx
+              | UnknownError text -> return! RequestErrors.BAD_REQUEST text ctx
             }
 
 startWebServer {defaultConfig with bindings = [ HttpBinding.mk HTTP (IPAddress.Parse "0.0.0.0") 80us ]} proxy 
