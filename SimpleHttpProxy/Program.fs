@@ -51,7 +51,7 @@ module Events =
 
     let publishGetWebsite data = appendEvent "proxy" "http-get" data ()
     let publishWebsiteResponse data metadata = appendEvent "proxy" "http-response" data metadata
-         
+
 [<AutoOpen>]
 module Proxy =
     open Suave.Http
