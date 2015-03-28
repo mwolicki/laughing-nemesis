@@ -79,10 +79,10 @@ module Proxy =
                                     |_ -> request.Headers.Add(key,value))
 
         let getWebsite (url:string) requestSetup = async {
-            let isError code ret (e:WebException) = if e.Message.Contains("("+code+")") then Some ret else None
+            let inline isError code ret (e:WebException) = if e.Message.Contains("("+code+")") then Some ret else None
             let (|Http304|_|) = isError "304" Http304
             let (|Http404|_|) = isError "404" Http404
-            let request = HttpWebRequest.Create url :?>HttpWebRequest
+            let request = HttpWebRequest.Create url :?> HttpWebRequest
             setHttpHeadres requestSetup.headers request
             try
                   let! response = request.AsyncGetResponse()
