@@ -61,7 +61,7 @@ module Proxy =
     open System.Collections.Generic
     open System.Collections.Specialized
 
-    type HttResponse = OK of WebHeaderCollection*(byte array) | NotModified
+    type HttResponse = OK of WebHeaderCollection*(byte array) | NotModified | NotFound | UnknownError of string
 
     let proxy: WebPart =
         let setHttpHeadres (headers:(string*string) list) (request:HttpWebRequest) = 
@@ -77,7 +77,11 @@ module Proxy =
                                     | "transfer-encoding" -> request.TransferEncoding <- value
                                     | "user-agent" -> request.UserAgent <- value
                                     |_ -> request.Headers.Add(key,value))
+
         let getWebsite (url:string) requestSetup = async {
+            let isError code ret (e:WebException) = if e.Message.Contains("("+code+")") then Some ret else None
+            let (|Http304|_|) = isError "304" Http304
+            let (|Http404|_|) = isError "404" Http404
             let request = HttpWebRequest.Create url :?>HttpWebRequest
             setHttpHeadres requestSetup.headers request
             try
@@ -85,17 +89,17 @@ module Proxy =
                   use stream = response.GetResponseStream()
                   let! responseBytes = stream.ReadAllAsync
                   return HttResponse.OK (response.Headers, responseBytes)
-              with | :? WebException as e when e.Message.Contains("(304) Not Modified") -> return NotModified}
-
-
+              with | :? WebException as e -> match e with
+                                             |Http304 -> return NotModified
+                                             |Http404 -> return NotFound
+                                             |_ -> return UnknownError e.Message
+        }
         fun (ctx : HttpContext) ->
             async {
               let! publishEvent = publishGetWebsite ctx.request
 
-              let url = match ctx.request.host with
-                        |ClientOnly host -> "http://" + host + ctx.request.url.LocalPath
-                        |_->failwith "Unsupported"
-              printfn "%A" url
+              let url = match ctx.request.host with ClientOnly host -> "http://" + host + ctx.request.url.LocalPath |_->failwith "Unsupported"
+              printfn "Get %A" url
               let! website = getWebsite url ctx.response
 
               Async.StartAsTask (publishWebsiteResponse website publishEvent.NextExpectedVersion) |> ignore
@@ -105,6 +109,8 @@ module Proxy =
                 let headers = headers.AllKeys |> Seq.map(fun x->(x, headers.[x]))|> Seq.toList
                 return! (ok responseBytes) {ctx with response = {ctx.response with headers = headers}}
               |NotModified -> return! Redirection.not_modified ctx
+              |NotFound -> return! RequestErrors.NOT_FOUND "Page not found" ctx
+              |UnknownError text -> return! RequestErrors.BAD_REQUEST text ctx
             }
 
 startWebServer {defaultConfig with bindings = [ HttpBinding.mk HTTP (IPAddress.Parse "0.0.0.0") 80us ]} proxy 
