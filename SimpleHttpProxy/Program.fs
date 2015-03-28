@@ -37,18 +37,20 @@ module Events =
                 es)
 
         let serializer = JsonSerializer (false,true)
-        let publishEvent (conn:IEventStoreConnection) stream event  = Async.AwaitTask (conn.AppendToStreamAsync(stream, ExpectedVersion.Any, event))
-
+        let inline publishEvent (conn:IEventStoreConnection) stream event  = Async.AwaitTask (conn.AppendToStreamAsync(stream, ExpectedVersion.Any, event))
         let serialize data = async {
                     use mem = new System.IO.MemoryStream()
                     serializer.Serialize(mem,data,leaveOpen = true)
                     mem.Position<-0L
                     return! mem.ReadAllAsync }
+        let inline appendEvent streamName eventType event metadata = async {
+                let! data = serialize event
+                let! metadata = serialize metadata
+                return! publishEvent (connection.Value) streamName [|(EventData(Guid.NewGuid(), eventType, false, data, metadata))|]
+            }
 
-    let publishGetWebsite data = async{
-            let! data = serialize data
-            return! publishEvent (connection.Value) "website-get" [|(EventData(Guid.NewGuid(), "http-get", false, data, [||]))|]
-        }
+    let publishGetWebsite data = appendEvent "proxy" "http-get" data ()
+    let publishWebsiteResponse data metadata = appendEvent "proxy" "http-response" data metadata
          
 [<AutoOpen>]
 module Proxy =
@@ -58,37 +60,51 @@ module Proxy =
     open Suave.Web
     open System.Collections.Generic
     open System.Collections.Specialized
- 
-    let proxy: WebPart =
-      fun (ctx : HttpContext) ->
-        async {
-          //publishGetWebsite ctx.request { BorwserIPAddress = ctx.runtime } |> Async.StartAsTask |> ignore
-          let! x = (publishGetWebsite ctx.request  )
-          let url = match ctx.request.host with
-                    |ClientOnly host -> "http://" + host + ctx.request.url.LocalPath
-                    |_->failwith "Unsupported"
-          printfn "%A" url
-          let request = HttpWebRequest.Create url :?>HttpWebRequest
-          ctx.request.headers |> Seq.iter (fun (key, value) -> match key.ToLowerInvariant() with
-                                                               | "accept" | "connection" | "content-length" | "proxy-connection" | "range" -> ()
-                                                               | "content-type" -> request.ContentType <- value
-                                                               | "date" -> request.Date <- DateTime.Parse(value)
-                                                               | "expect" -> request.Expect <- value
-                                                               | "host" -> request.Host <- value
-                                                               | "if-modified-since" -> request.IfModifiedSince <- DateTime.Parse(value)
-                                                               | "referer" -> request.Referer <- value
-                                                               | "transfer-encoding" -> request.TransferEncoding <- value
-                                                               | "user-agent" -> request.UserAgent <- value
-                                                               |_ -> request.Headers.Add(key,value))
-          try
-              let! response = request.AsyncGetResponse()
-              use stream = response.GetResponseStream()
-              let! responseBytes = stream.ReadAllAsync
-              let headers = response.Headers.AllKeys |> Seq.map(fun x->(x, response.Headers.[x]))|> Seq.toList
 
-              let p =(ok responseBytes) {ctx with response = {ctx.response with headers = headers}}
-              return! p
-          with | :? WebException as e when e.Message.Contains("(304) Not Modified") -> return! Redirection.not_modified ctx
-        }
+    type HttResponse = OK of WebHeaderCollection*(byte array) | NotModified
+
+    let proxy: WebPart =
+        let setHttpHeadres (headers:(string*string) list) (request:HttpWebRequest) = 
+            headers |> Seq.iter (
+                fun (key, value) -> match key.ToLowerInvariant() with
+                                    | "accept" | "connection" | "content-length" | "proxy-connection" | "range" -> ()
+                                    | "content-type" -> request.ContentType <- value
+                                    | "date" -> request.Date <- DateTime.Parse(value)
+                                    | "expect" -> request.Expect <- value
+                                    | "host" -> request.Host <- value
+                                    | "if-modified-since" -> request.IfModifiedSince <- DateTime.Parse(value)
+                                    | "referer" -> request.Referer <- value
+                                    | "transfer-encoding" -> request.TransferEncoding <- value
+                                    | "user-agent" -> request.UserAgent <- value
+                                    |_ -> request.Headers.Add(key,value))
+        let getWebsite (url:string) requestSetup = async {
+            let request = HttpWebRequest.Create url :?>HttpWebRequest
+            setHttpHeadres requestSetup.headers request
+            try
+                  let! response = request.AsyncGetResponse()
+                  use stream = response.GetResponseStream()
+                  let! responseBytes = stream.ReadAllAsync
+                  return HttResponse.OK (response.Headers, responseBytes)
+              with | :? WebException as e when e.Message.Contains("(304) Not Modified") -> return NotModified}
+
+
+        fun (ctx : HttpContext) ->
+            async {
+              let! publishEvent = publishGetWebsite ctx.request
+
+              let url = match ctx.request.host with
+                        |ClientOnly host -> "http://" + host + ctx.request.url.LocalPath
+                        |_->failwith "Unsupported"
+              printfn "%A" url
+              let! website = getWebsite url ctx.response
+
+              Async.StartAsTask (publishWebsiteResponse website publishEvent.NextExpectedVersion) |> ignore
+
+              match website with
+              |OK (headers,responseBytes) -> 
+                let headers = headers.AllKeys |> Seq.map(fun x->(x, headers.[x]))|> Seq.toList
+                return! (ok responseBytes) {ctx with response = {ctx.response with headers = headers}}
+              |NotModified -> return! Redirection.not_modified ctx
+            }
 
 startWebServer {defaultConfig with bindings = [ HttpBinding.mk HTTP (IPAddress.Parse "0.0.0.0") 80us ]} proxy 
